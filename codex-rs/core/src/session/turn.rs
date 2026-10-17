@@ -2665,6 +2665,9 @@ async fn try_run_sampling_request(
     let effort = sess
         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
         .await;
+    // Responses Lite includes all-turns reasoning in usage without requiring a header.
+    // Keep this request's mode local until it supplies a new usage baseline.
+    let mut server_reasoning_included = step_context.settings.model_info.use_responses_lite;
     let mut stream = client_session
         .stream(
             prompt,
@@ -3051,7 +3054,7 @@ async fn try_run_sampling_request(
                 .await;
             }
             ResponseEvent::ServerReasoningIncluded(included) => {
-                sess.set_server_reasoning_included(included).await;
+                server_reasoning_included = included;
             }
             ResponseEvent::RateLimits(snapshot) => {
                 // Update internal state with latest rate limits, but defer sending until
@@ -3096,6 +3099,10 @@ async fn try_run_sampling_request(
                     usage_metadata.as_ref(),
                 )
                 .await;
+                if token_usage.is_some() {
+                    sess.set_server_reasoning_included(server_reasoning_included)
+                        .await;
+                }
                 let budget_result = sess
                     .record_token_usage_info(
                         &turn_context,
