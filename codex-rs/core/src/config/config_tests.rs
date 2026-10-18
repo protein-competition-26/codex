@@ -8660,6 +8660,7 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
             max_depth: None,
             default_subagent_model: None,
             default_subagent_reasoning_effort: None,
+            default_subagent_service_tier: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -9644,6 +9645,38 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
     Ok(())
 }
 
+#[test_case::test_case(None, None; "inherit when omitted")]
+#[test_case::test_case(Some("default"), Some("default"); "standard tier")]
+#[test_case::test_case(Some("priority"), Some("priority"); "priority tier")]
+#[test_case::test_case(Some("fast"), Some("priority"); "fast alias")]
+#[test_case::test_case(Some("ultrafast"), Some("ultrafast"); "ultrafast tier")]
+#[test_case::test_case(Some("flex"), Some("flex"); "flex tier")]
+#[tokio::test]
+async fn load_config_resolves_agent_service_tier(
+    configured: Option<&str>,
+    expected: Option<&str>,
+) -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut contents = "service_tier = \"flex\"\n[agents]\n".to_string();
+    if let Some(tier) = configured {
+        contents.push_str(&format!("default_subagent_service_tier = {tier:?}\n"));
+    }
+    let cfg: ConfigToml =
+        toml::from_str(&contents).expect("agents.default_subagent_service_tier should parse");
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    assert_eq!(
+        config.agent_default_subagent_service_tier.as_deref(),
+        expected
+    );
+    assert_eq!(config.service_tier.as_deref(), Some("flex"));
+    Ok(())
+}
+
 #[test]
 fn agents_max_threads_alias_matches_canonical_config() {
     let canonical: ConfigToml = toml::from_str(
@@ -9675,6 +9708,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
             max_depth: None,
             default_subagent_model: None,
             default_subagent_reasoning_effort: None,
+            default_subagent_service_tier: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -9721,6 +9755,7 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
             max_depth: None,
             default_subagent_model: None,
             default_subagent_reasoning_effort: None,
+            default_subagent_service_tier: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -9761,6 +9796,7 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
             max_depth: None,
             default_subagent_model: None,
             default_subagent_reasoning_effort: None,
+            default_subagent_service_tier: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -9801,6 +9837,7 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
             max_depth: None,
             default_subagent_model: None,
             default_subagent_reasoning_effort: None,
+            default_subagent_service_tier: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(

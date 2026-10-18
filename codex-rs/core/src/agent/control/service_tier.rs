@@ -1,10 +1,10 @@
-//! Shares the root user's selected routing tier across the entire agent tree.
+//! Shares the root user's routing tier as the fallback for subagents without an override.
 
 use super::LocalAgentControl;
 use std::sync::Arc;
 
 impl LocalAgentControl {
-    /// Returns the latest user-selected tier for this root and all its descendants.
+    /// Returns the latest user-selected tier for the root and inheriting descendants.
     pub(crate) fn root_service_tier(&self) -> Option<String> {
         self.runtime
             .root_service_tier

@@ -27,15 +27,21 @@ use std::time::Duration;
 
 const WS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 
-#[test_case::test_case("priority", true, false; "fast mode enabled")]
-#[test_case::test_case("priority", false, true; "fast mode disabled")]
-#[test_case::test_case("ultrafast", false, true; "ultrafast mode enabled")]
-#[test_case::test_case("ultrafast", true, false; "ultrafast mode disabled")]
+#[test_case::test_case("priority", true, false, None; "fast mode enabled")]
+#[test_case::test_case("priority", false, true, None; "fast mode disabled")]
+#[test_case::test_case("ultrafast", false, true, None; "ultrafast mode enabled")]
+#[test_case::test_case("ultrafast", true, false, None; "ultrafast mode disabled")]
+#[test_case::test_case("priority", true, true, Some("ultrafast"); "subagent ultrafast override")]
+#[test_case::test_case("ultrafast", false, true, Some("priority"); "disabled subagent tier does not fall back to root")]
+#[test_case::test_case("priority", true, true, Some("default"); "subagent standard override")]
+#[test_case::test_case("priority", true, false, Some("flex"); "subagent flex without catalog entry")]
+#[test_case::test_case("priority", true, false, Some("unsupported"); "unsupported subagent tier does not fall back to root")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
+async fn spawned_agent_prewarm_handshake_uses_effective_service_tier(
     tier: &'static str,
     fast_mode_enabled: bool,
     ultrafast_mode_enabled: bool,
+    agent_default_subagent_service_tier: Option<&'static str>,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -67,20 +73,25 @@ async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
         ],
     ])
     .await;
-    let tier_enabled = if tier == "ultrafast" {
-        ultrafast_mode_enabled
-    } else {
-        fast_mode_enabled
+    let child_tier = agent_default_subagent_service_tier.unwrap_or(tier);
+    let expected_tier = match child_tier {
+        "default" => None,
+        "flex" => Some(child_tier),
+        "ultrafast" => ultrafast_mode_enabled.then_some(child_tier),
+        "priority" => fast_mode_enabled.then_some(child_tier),
+        _ => None,
     };
     let test = test_codex()
         .with_model("gpt-5.4")
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_model_info_override("gpt-5.4", move |model| {
-            model.service_tiers.push(ModelServiceTier {
-                id: tier.to_string(),
-                name: "Fast".to_string(),
-                description: "Priority processing".to_string(),
-            });
+            model.service_tiers = ["priority", "ultrafast"]
+                .map(|tier| ModelServiceTier {
+                    id: tier.to_string(),
+                    name: tier.to_string(),
+                    description: "Faster processing".to_string(),
+                })
+                .into();
         })
         .with_config(move |config| {
             for feature in [Feature::Collab, Feature::MultiAgentV2] {
@@ -102,6 +113,8 @@ async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
                 .set_enabled(Feature::UltrafastMode, ultrafast_mode_enabled)
                 .expect("configure Ultra Fast mode");
             config.service_tier = Some(tier.to_string());
+            config.agent_default_subagent_service_tier =
+                agent_default_subagent_service_tier.map(str::to_string);
         })
         .build_with_websocket_server(&server)
         .await?;
@@ -134,7 +147,7 @@ async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
         "child startup should connect before its first turn"
     );
     let handshakes = server.handshakes();
-    let expected_hint = if tier_enabled {
+    let expected_hint = if let Some(tier) = expected_tier {
         format!("model=gpt-5.4;tier={tier}")
     } else {
         "model=gpt-5.4".to_string()
@@ -150,10 +163,7 @@ async fn spawned_agent_prewarm_handshake_inherits_effective_root_service_tier(
     .await?
     .body_json();
     assert_eq!(child_warmup["generate"], false);
-    assert_eq!(
-        child_warmup["service_tier"].as_str(),
-        tier_enabled.then_some(tier)
-    );
+    assert_eq!(child_warmup["service_tier"].as_str(), expected_tier);
     assert_eq!(server.handshakes().len(), 2);
     child.shutdown_and_wait().await?;
     test.codex.shutdown_and_wait().await?;

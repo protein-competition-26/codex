@@ -3899,10 +3899,14 @@ impl Session {
             turn_context.session_source,
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
         ) {
-            let root_service_tier = self.services.agent_control.service_tier();
-            if settings.selected().service_tier != root_service_tier {
+            let service_tier = turn_context
+                .config
+                .agent_default_subagent_service_tier
+                .clone()
+                .or_else(|| self.services.agent_control.service_tier());
+            if settings.selected().service_tier != service_tier {
                 let mut selected = settings.selected().clone();
-                selected.service_tier = root_service_tier;
+                selected.service_tier = service_tier;
                 let mut inherited_settings = ResolvedStepSettings::new(
                     Arc::new(selected),
                     Arc::clone(&settings.model_info),
