@@ -1863,6 +1863,20 @@ impl Session {
         let context = crate::guardian::GuardianReviewContext::from(turn_context);
         let (_, reviewer) = crate::guardian::resolve_review_model(self, &context).await;
         let reviewer_compaction_hash = reviewer.comp_hash.clone();
+        // Restore the accounting mode for the recorded usage, including when the
+        // resumed thread selects a different model for its next request.
+        let server_reasoning_included = if let Some(settings) = &previous_turn_settings {
+            self.services
+                .models_manager
+                .get_model_info(
+                    &settings.model,
+                    &turn_context.config.to_models_manager_config(),
+                )
+                .await
+                .use_responses_lite
+        } else {
+            false
+        };
         {
             let mut state = self.state.lock().await;
             state.replace_annotated_history(
@@ -1891,6 +1905,7 @@ impl Session {
                 },
             );
             state.set_previous_turn_settings(previous_turn_settings.clone());
+            state.set_server_reasoning_included(server_reasoning_included);
         }
         let prefix_tokens = if matches!(
             turn_context.config.model_auto_compact_token_limit_scope,

@@ -5258,10 +5258,207 @@ async fn auto_compact_body_after_prefix_still_caps_at_context_window() {
     );
 }
 
-#[test_case::test_case(false; "counts_encrypted_reasoning_before_last_user")]
-#[test_case::test_case(true; "compacts_after_reasoning_header_clears")]
+#[test_case::test_case(AutoCompactTokenLimitScope::Total, false; "total_live")]
+#[test_case::test_case(AutoCompactTokenLimitScope::Total, true; "total_resumed")]
+#[test_case::test_case(AutoCompactTokenLimitScope::BodyAfterPrefix, false; "body_live")]
+#[test_case::test_case(AutoCompactTokenLimitScope::BodyAfterPrefix, true; "body_resumed")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_compact_accounts_for_encrypted_reasoning(first_response_includes_reasoning: bool) {
+async fn all_turns_reasoning_without_header_is_not_double_counted(
+    scope: AutoCompactTokenLimitScope,
+    restart: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let encrypted_reasoning = "a".repeat(8_000);
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_reasoning_item(
+                    "old-reasoning",
+                    &["previous reasoning"],
+                    &[&encrypted_reasoning],
+                ),
+                ev_assistant_message("m1", "first reply"),
+                ev_completed_with_tokens("r1", /*total_tokens*/ 10),
+            ]),
+            sse(vec![
+                ev_function_call(
+                    "plan-call",
+                    "update_plan",
+                    r#"{"plan":[{"step":"Check context accounting","status":"completed"}]}"#,
+                ),
+                ev_completed_with_tokens("r2", /*total_tokens*/ 80),
+            ]),
+            sse(vec![
+                ev_assistant_message("m2", "second reply"),
+                ev_completed_with_tokens("r3", /*total_tokens*/ 100),
+            ]),
+            sse(vec![
+                ev_assistant_message("m3", "third reply"),
+                ev_completed_with_tokens("r4", /*total_tokens*/ 120),
+            ]),
+        ],
+    )
+    .await;
+    let make_builder = || {
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_model_info_override("gpt-5.4", |model| {
+                model.use_responses_lite = true;
+                model.effective_context_window_percent = 100;
+            })
+            .with_config(move |config| {
+                config.model_context_window = Some(1_000);
+                config.model_auto_compact_token_limit = Some(800);
+                config.model_auto_compact_token_limit_scope = scope;
+                config.update_plan_enabled = true;
+                config.model_provider.stream_max_retries = Some(0);
+                set_test_compact_prompt(config);
+            })
+    };
+    let test = make_builder().build_with_auto_env(&server).await?;
+    test.submit_text_turn("first message").await?;
+    test.submit_text_turn("second message").await?;
+    let test = if restart {
+        make_builder().restart(&server, &test).await?
+    } else {
+        test
+    };
+    test.submit_text_turn("third message").await?;
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 4, "three user turns and one tool follow-up");
+    for request in &requests {
+        assert_eq!(
+            request.body_json()["reasoning"]["context"],
+            json!("all_turns")
+        );
+        assert!(request.inputs_of_type("compaction_trigger").is_empty());
+    }
+    assert_eq!(requests[3].inputs_of_type("reasoning").len(), 1);
+    Ok(())
+}
+
+#[test_case::test_case(false, false, None; "legacy_to_lite_live")]
+#[test_case::test_case(false, true, None; "legacy_to_lite_resumed")]
+#[test_case::test_case(true, false, None; "lite_to_legacy_live")]
+#[test_case::test_case(true, true, None; "lite_to_legacy_resumed")]
+#[test_case::test_case(true, false, Some("http_error"); "failed_request_preserves_accounting")]
+#[test_case::test_case(true, false, Some("missing_usage"); "missing_usage_preserves_accounting")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reasoning_accounting_uses_previous_model_before_switch(
+    previous_model_is_lite: bool,
+    restart: bool,
+    unsuccessful_request: Option<&str>,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let encrypted_reasoning = "a".repeat(80_000);
+    let mut responses = vec![
+        sse(vec![
+            ev_reasoning_item("old-reasoning", &["reasoning"], &[&encrypted_reasoning]),
+            ev_assistant_message("m1", "first reply"),
+            ev_completed_with_tokens("r1", /*total_tokens*/ 10),
+        ]),
+        sse(vec![
+            ev_assistant_message("m2", "second reply"),
+            ev_completed_with_tokens("r2", /*total_tokens*/ 80),
+        ]),
+    ];
+    if !previous_model_is_lite {
+        responses.push(remote_v2_compaction_response());
+    }
+    responses.push(sse(vec![
+        ev_assistant_message("m3", "third reply"),
+        ev_completed_with_tokens("r3", /*total_tokens*/ 100),
+    ]));
+    let mut responses = responses.into_iter().map(sse_response).collect::<Vec<_>>();
+    if let Some(kind) = unsuccessful_request {
+        let response = match kind {
+            "http_error" => invalid_request_response("test request rejected"),
+            "missing_usage" => sse_response(sse(vec![
+                ev_assistant_message("no-usage", "reply without usage"),
+                json!({"type": "response.completed", "response": {"id": "no-usage-response"}}),
+            ])),
+            _ => unreachable!("unknown unsuccessful request fixture"),
+        };
+        responses.insert(2, response);
+    }
+    let request_log = mount_response_sequence(&server, responses).await;
+    let (previous_model, next_model) = if previous_model_is_lite {
+        ("reasoning-lite", "gpt-5.5")
+    } else {
+        ("gpt-5.5", "reasoning-lite")
+    };
+    let make_builder = || {
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_model_info_override("reasoning-lite", |model| {
+                model.use_responses_lite = true;
+            })
+            .with_model_info_override("gpt-5.5", |model| {
+                model.use_responses_lite = false;
+            })
+            .with_model(previous_model)
+            .with_config(|config| {
+                // Leave room for local model-switch instructions, but not double-counted reasoning.
+                config.model_auto_compact_token_limit = Some(10_000);
+                config.model_provider.stream_max_retries = Some(0);
+                set_test_compact_prompt(config);
+            })
+    };
+    let test = make_builder().build_with_auto_env(&server).await?;
+    test.submit_text_turn("first message").await?;
+    test.submit_text_turn("second message").await?;
+    assert_eq!(request_log.requests().len(), 2);
+    let test = if restart {
+        make_builder()
+            .with_model(next_model)
+            .restart(&server, &test)
+            .await?
+    } else {
+        test
+    };
+    let turn_count = if unsuccessful_request.is_some() { 2 } else { 1 };
+    for _ in 0..turn_count {
+        test.codex
+            .start_or_steer_turn(
+                TurnInputRequest::user_input(vec![UserInput::Text {
+                    text: "next message".into(),
+                    text_elements: Vec::new(),
+                }])
+                .with_thread_settings(ThreadSettingsOverrides {
+                    model: Some(next_model.into()),
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    }
+    let requests = request_log.requests();
+    let extra_request = usize::from(unsuccessful_request.is_some());
+    assert_eq!(
+        requests.len(),
+        if previous_model_is_lite { 3 } else { 4 } + extra_request
+    );
+    assert_eq!(
+        requests[2 + extra_request]
+            .inputs_of_type("compaction_trigger")
+            .is_empty(),
+        previous_model_is_lite,
+        "pre-turn compaction must use the previous model's accounting"
+    );
+    Ok(())
+}
+
+#[test_case::test_case(false, false; "counts_encrypted_reasoning_before_last_user")]
+#[test_case::test_case(true, false; "compacts_after_reasoning_header_clears")]
+#[test_case::test_case(true, true; "preserves_reasoning_header_before_next_turn")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_compact_accounts_for_encrypted_reasoning(
+    first_response_includes_reasoning: bool,
+    second_response_includes_reasoning: bool,
+) {
     skip_if_no_network!();
 
     let server = start_mock_server().await;
@@ -5287,24 +5484,25 @@ async fn auto_compact_accounts_for_encrypted_reasoning(first_response_includes_r
         ev_completed_with_tokens("r4", /*total_tokens*/ 1),
     ]);
 
-    let request_log = mount_response_sequence(
-        &server,
-        vec![
-            // Turn 1: reasoning before last user (should count).
-            if first_response_includes_reasoning {
-                sse_response(first_turn).insert_header("X-Reasoning-Included", "true")
-            } else {
-                sse_response(first_turn)
-            },
-            // Turn 2: reasoning after last user should be ignored; no header is returned.
-            sse_response(second_turn),
-            // Turn 3: compact the prior conversation before sampling.
-            sse_response(compact_turn),
-            // Turn 3: next user turn after remote compaction.
-            sse_response(third_turn),
-        ],
-    )
-    .await;
+    let mut responses = vec![
+        // Turn 1: reasoning before last user (should count).
+        if first_response_includes_reasoning {
+            sse_response(first_turn).insert_header("X-Reasoning-Included", "true")
+        } else {
+            sse_response(first_turn)
+        },
+        // Turn 2: the header qualifies this response's usage, including at turn 3.
+        if second_response_includes_reasoning {
+            sse_response(second_turn).insert_header("X-Reasoning-Included", "true")
+        } else {
+            sse_response(second_turn)
+        },
+    ];
+    if !second_response_includes_reasoning {
+        responses.push(sse_response(compact_turn));
+    }
+    responses.push(sse_response(third_turn));
+    let request_log = mount_response_sequence(&server, responses).await;
 
     let codex = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
@@ -5342,6 +5540,15 @@ async fn auto_compact_accounts_for_encrypted_reasoning(first_response_includes_r
     }
 
     let requests = request_log.requests();
+    if second_response_includes_reasoning {
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.inputs_of_type("compaction_trigger").is_empty())
+        );
+        return;
+    }
     assert_eq!(
         requests.len(),
         4,
