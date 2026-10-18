@@ -795,8 +795,12 @@ service_tier = "turbo"
     );
 }
 
+#[test_case::test_case(None; "inherits root tier")]
+#[test_case::test_case(Some("flex"); "uses configured subagent tier")]
 #[tokio::test]
-async fn spawn_agent_full_history_fork_inherits_root_service_tier() {
+async fn spawn_agent_full_history_fork_inherits_root_service_tier(
+    agent_default_subagent_service_tier: Option<&str>,
+) {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
@@ -808,6 +812,8 @@ async fn spawn_agent_full_history_fork_inherits_root_service_tier() {
         .await;
     let mut config = (*turn.config).clone();
     config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+    config.agent_default_subagent_service_tier =
+        agent_default_subagent_service_tier.map(str::to_string);
     turn.config = Arc::new(config);
     let manager = thread_manager();
     let root = manager
@@ -848,12 +854,20 @@ async fn spawn_agent_full_history_fork_inherits_root_service_tier() {
 
     assert_eq!(
         snapshot.service_tier,
-        Some(ServiceTier::Fast.request_value().to_string())
+        Some(
+            agent_default_subagent_service_tier
+                .unwrap_or(ServiceTier::Fast.request_value())
+                .to_string()
+        )
     );
 }
 
+#[test_case::test_case(None; "inherits root tier")]
+#[test_case::test_case(Some("flex"); "uses configured subagent tier")]
 #[tokio::test]
-async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
+async fn multi_agent_v2_full_history_fork_inherits_root_service_tier(
+    agent_default_subagent_service_tier: Option<&str>,
+) {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         task_name: String,
@@ -865,6 +879,8 @@ async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
         .await;
     let mut config = (*turn.config).clone();
     config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+    config.agent_default_subagent_service_tier =
+        agent_default_subagent_service_tier.map(str::to_string);
     config
         .features
         .enable(Feature::MultiAgentV2)
@@ -921,7 +937,11 @@ async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
 
     assert_eq!(
         snapshot.service_tier,
-        Some(ServiceTier::Fast.request_value().to_string())
+        Some(
+            agent_default_subagent_service_tier
+                .unwrap_or(ServiceTier::Fast.request_value())
+                .to_string()
+        )
     );
 }
 

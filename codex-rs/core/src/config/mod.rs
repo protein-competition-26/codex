@@ -969,6 +969,9 @@ pub struct Config {
     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub agent_default_subagent_reasoning_effort: Option<ReasoningEffort>,
 
+    /// Service tier for spawned subagents. When unset, inherits the parent's tier.
+    pub agent_default_subagent_service_tier: Option<String>,
+
     /// Whether to record a model-visible message when an agent turn is interrupted.
     pub agent_interrupt_message_enabled: bool,
 
@@ -4019,6 +4022,15 @@ impl Config {
             .agents
             .as_ref()
             .and_then(|agents| agents.default_subagent_reasoning_effort.clone());
+        let agent_default_subagent_service_tier = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.default_subagent_service_tier.clone())
+            .map(|tier| {
+                ServiceTier::from_request_value(&tier)
+                    .map(|tier| tier.request_value().to_string())
+                    .unwrap_or(tier)
+            });
         let agent_interrupt_message_enabled = cfg
             .agents
             .as_ref()
@@ -4499,6 +4511,7 @@ impl Config {
             agent_max_threads,
             agent_default_subagent_model,
             agent_default_subagent_reasoning_effort,
+            agent_default_subagent_service_tier,
             agent_max_depth,
             agent_roles,
             max_goal_token_budget: cfg

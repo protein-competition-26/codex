@@ -770,6 +770,8 @@ pub struct AgentsToml {
     pub default_subagent_model: Option<String>,
     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub default_subagent_reasoning_effort: Option<ReasoningEffort>,
+    /// Service tier for spawned subagents. When unset, inherits the parent's tier.
+    pub default_subagent_service_tier: Option<String>,
     /// Removed agent-job setting retained as a no-op for compatibility.
     #[schemars(skip)]
     pub job_max_runtime_seconds: Option<u64>,
